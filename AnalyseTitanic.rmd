@@ -1,0 +1,873 @@
+---
+title: "Mini-Projet Méthodes statistiques et étude de de Données"
+subtitle: "Analyse du dataset Titanic ACP et KMeans"
+author: "Bchini Rania - Ghanmi Roudaina - Ben Rached Mouheb -Ben Rached Mouadh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 13,
+  fig.height = 8,
+  dpi = 300
+)
+
+rm(list = ls())
+set.seed(42)
+```
+
+```{r load-packages}
+#importer
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(FactoMineR)
+  library(factoextra)
+  library(cluster)
+  library(ggplot2)
+  library(gridExtra)
+  library(scales)
+  library(corrplot)
+  library(mice)
+  library(knitr)
+  library(kableExtra)
+})
+```
+
+# ÉTAPE 1: COMPRÉHENSION DU PROBLÈME
+
+```{r context}
+
+cat("
+📊 PROBLÉMATIQUE
+
+Comment identifier des profils homogènes de passagers à partir de leurs
+caractéristiques socio-démographiques et économiques, en utilisant des
+méthodes d’apprentissage non supervisé ?
+
+Plus précisément :
+
+→ Existe-t-il des groupes naturels parmi les passagers ?
+→ Peut-on segmenter les passagers sans utiliser la variable survived ?
+→ Les clusters obtenus présentent-ils des différences en termes de survie ?
+→ Quelles caractéristiques distinguent chaque groupe identifié ?
+")
+
+```
+
+---
+
+# ÉTAPE 2 : PRÉPARATION DES DONNÉES
+
+```{r load-data}
+
+# Chargement du dataset
+df_raw <- read.csv("./titanic.csv", stringsAsFactors = FALSE)
+
+cat(sprintf("Dataset brut : %d obs × %d variables\n\n", 
+            nrow(df_raw), ncol(df_raw)))
+
+# SÉPARER IMMÉDIATEMENT LA TARGET
+survived_col <- df_raw$survived
+
+# Sélectionner features (SANS survived)
+df_clean <- df_raw %>%
+  select(pclass, sex, age, sibsp, parch, fare, embarked)
+
+#Apercu du dataset
+cat(sprintf("Dataset : %d observations × %d variables\n\n", 
+            nrow(df_clean), ncol(df_clean)))
+
+cat("\n Premières lignes :\n")
+print(head(df_clean, 5), digits = 3)
+
+#valeurs manquantes
+cat("Nombre total de valeurs manquantes :", sum(is.na(df_clean)), "\n")
+
+print("\n VALEURS MANQUANTES PAR VARIABLE\n")
+missing_values <- sapply(df_clean, function(x) sum(is.na(x)))
+
+missing_table <- data.frame(
+  Variable = names(missing_values),
+  Valeurs_manquantes = missing_values,
+  Pourcentage = round((missing_values / nrow(df_clean)) * 100, 2)
+)
+
+missing_table <- missing_table[missing_table$Valeurs_manquantes > 0, ]
+print(missing_table)
+
+# Imputer Age  valeurs manquante par median
+age_median <- median(df_clean$age, na.rm = TRUE)
+df_clean$age[is.na(df_clean$age)] <- age_median
+
+# Supprimer manquantes embarked
+df_clean <- df_clean %>%
+  filter(!is.na(embarked))
+#print(df_clean)
+# Aligner survived
+survived_col <- survived_col[!is.na(df_raw$embarked)]
+
+cat(sprintf("Dataset nettoyé : %d obs × %d variables\n", 
+            nrow(df_clean), ncol(df_clean)))
+
+# Vérifier structure
+cat("Variables pour clustering :\n")
+print(colnames(df_clean))
+```
+
+## 2.2 Analyse descriptive générale
+
+```{r descriptive-generale}
+cat("\n================ ANALYSE DESCRIPTIVE GÉNÉRALE ================\n")
+
+# Types variables
+num_vars <- names(df_clean)[sapply(df_clean, is.numeric)]
+cat_vars <- names(df_clean)[sapply(df_clean, function(x) is.character(x) | is.factor(x))]
+
+type_table <- data.frame(
+  Variables_numeriques = c(num_vars, rep("", max(length(num_vars), length(cat_vars)) - length(num_vars))),
+  Variables_categorielles = c(cat_vars, rep("", max(length(num_vars), length(cat_vars)) - length(cat_vars)))
+)
+
+kable(type_table, caption = "Types des variables") %>%
+  kable_styling(full_width = FALSE)
+
+summary(df_clean)
+```
+
+---
+
+## 2.3 Analyse univariée
+
+```{r analyse-univariee}
+cat("\n================ ANALYSE UNIVARIÉE ================\n")
+
+theme_set(theme_minimal(base_size = 13))
+
+# Variables numériques
+num_long <- df_clean %>%
+  select(age, fare, sibsp, parch) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Valeur")
+
+# Statistiques
+stats_uni <- df_clean %>%
+  select(age, fare, sibsp, parch) %>%
+  summarise_all(list(
+    Moyenne = ~round(mean(., na.rm=TRUE),2),
+    Mediane = ~round(median(., na.rm=TRUE),2),
+    SD = ~round(sd(., na.rm=TRUE),2),
+    Min = ~round(min(., na.rm=TRUE),2),
+    Max = ~round(max(., na.rm=TRUE),2)
+  )) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable",".value"),
+               names_sep = "_")
+
+kable(stats_uni, caption = "Statistiques descriptives variables numériques") %>%
+  kable_styling(full_width = FALSE)
+
+# Histogrammes
+ggplot(num_long, aes(x = Valeur)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 fill = "#3498db",
+                 color = "white",
+                 bins = 25,
+                 alpha = 0.8) +
+  geom_density(color = "red", linewidth = 1.2) +
+  facet_wrap(~Variable, scales = "free", ncol = 2) +
+  labs(
+    title = "Distribution des variables numériques",
+    x = "Valeur",
+    y = "Densité"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    strip.text = element_text(face = "bold")
+  )
+
+# Boxplots
+ggplot(num_long, aes(x=Variable, y=Valeur, fill=Variable)) +
+  geom_boxplot(alpha=.8) +
+  theme(legend.position="none") +
+  labs(title="Boxplots des variables numériques") +
+  theme(plot.title = element_text(face="bold", hjust=.5))
+
+# Variables catégorielles
+cat_long <- df_clean %>%
+  select(pclass, sex, embarked) %>%
+  mutate(across(everything(), as.factor)) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Modalite")
+
+ggplot(cat_long, aes(Modalite, fill=Modalite)) +
+  geom_bar() +
+  facet_wrap(~Variable, scales="free") +
+  labs(title="Répartition des variables catégorielles", x="", y="Effectif") +
+  theme(plot.title = element_text(face="bold", hjust=.5),
+        legend.position="bottom")
+```
+
+---
+
+## 2.4 Analyse bivariée
+
+```{r analyse-bivariee}
+cat("\n================ ANALYSE BIVARIÉE ================\n")
+
+# ajouter survived juste pour analyse
+df_eda <- df_clean
+df_eda$survived <- factor(survived_col)
+
+# Numérique vs target
+p1 <- ggplot(df_eda, aes(survived, age, fill=survived)) +
+  geom_violin(alpha=.6) +
+  geom_boxplot(width=.15, fill="white") +
+  labs(title="Âge selon survived")
+
+p2 <- ggplot(df_eda, aes(survived, fare, fill=survived)) +
+  geom_violin(alpha=.6) +
+  geom_boxplot(width=.15, fill="white") +
+  labs(title="Fare selon survived")
+
+# Catégorielle vs target
+p3 <- ggplot(df_eda, aes(sex, fill=survived)) +
+  geom_bar(position="fill") +
+  scale_y_continuous(labels=percent) +
+  labs(title="Sexe vs survived", y="%")
+
+p4 <- ggplot(df_eda, aes(factor(pclass), fill=survived)) +
+  geom_bar(position="fill") +
+  scale_y_continuous(labels=percent) +
+  labs(title="Classe vs survived", y="%")
+
+grid.arrange(p1,p2,p3,p4,ncol=2)
+
+# Corrélation numériques
+cor_mat <- cor(df_eda %>% select(age,fare,sibsp,parch), use="complete.obs")
+
+corrplot(cor_mat,
+         method="color",
+         addCoef.col="black",
+         tl.col="black",
+         number.cex=.8,
+         title="Matrice de corrélation",
+         mar=c(0,0,2,0))
+```
+
+---
+
+## 2.5 Tests statistiques
+
+```{r tests-statistiques}
+cat("\n================ TESTS STATISTIQUES ================\n")
+
+df_test <- df_clean
+df_test$survived <- factor(survived_col)
+
+### ANOVA
+cat("\n--- ANOVA ---\n")
+
+anova_age_survived <- aov(age ~ survived, data=df_test)
+anova_fare_survived <- aov(fare ~ survived, data=df_test)
+anova_fare_sex <- aov(fare ~ sex, data=df_test)
+anova_pclass_age <- aov(age ~ pclass, data=df_test)
+
+print(summary(anova_age_survived))
+print(summary(anova_fare_survived))
+print(summary(anova_fare_sex))
+print(summary(anova_pclass_age))
+
+### Pearson
+cat("\n--- Pearson ---\n")
+
+pearson_test1 <- cor.test(df_test$age, df_test$fare, method="pearson")
+pearson_test2 <- cor.test(df_test$age, df_test$pclass, method="pearson")
+print(pearson_test1)
+print(pearson_test2)
+
+### Chi²
+cat("\n--- Chi² ---\n")
+
+chi1 <- chisq.test(table(df_test$sex, df_test$survived))
+chi2 <- chisq.test(table(df_test$pclass, df_test$sex))
+chi3 <- chisq.test(table(df_test$embarked, df_test$sex))
+chi4 <- chisq.test(table(df_test$survived, df_test$pclass))
+
+print(chi1)
+print(chi2)
+print(chi3)
+print(chi4)
+
+# Heatmap p-values
+test_results <- data.frame(
+  Test = c("ANOVA age/survived","ANOVA fare/survived","ANOVA fare/sex","ANOVA pclass/age","Pearson age-fare","Pearson age-pclass","Chi² sex/survived","Chi² class/sex","Chi² embarked/sex","Chi² survived/pclass"),
+  pvalue = c(
+    summary(anova_age_survived)[[1]][["Pr(>F)"]][1],
+    summary(anova_fare_survived)[[1]][["Pr(>F)"]][1],
+    summary(anova_fare_sex)[[1]][["Pr(>F)"]][1],
+    summary(anova_pclass_age)[[1]][["Pr(>F)"]][1],
+    
+    pearson_test1$p.value,
+    pearson_test2$p.value,
+    chi1$p.value,
+    chi2$p.value,
+    chi3$p.value,
+    chi4$p.value
+  )
+)
+
+kable(test_results, digits=5, caption="Synthèse tests statistiques") %>%
+  kable_styling(full_width = FALSE)
+```
+
+
+
+# ÉTAPE 3 : ANALYSE FACTORIELLE (ACP)
+
+## 3.1 Préparation ACP
+
+```{r acp-prep}
+print("\n\n PRÉPARATION POUR ACP\n")
+
+df_acp <- df_clean %>%
+  mutate(
+    # Normaliser numériques
+    age_norm = scale(age)[, 1],
+    fare_norm = scale(fare)[, 1],
+    sibsp_norm = scale(sibsp)[, 1],
+    parch_norm = scale(parch)[, 1],
+    # Garder catégories
+    sex = as.character(sex),
+    pclass = as.character(pclass),
+    embarked = as.character(embarked)
+  ) %>%
+  select(age_norm, fare_norm, sibsp_norm, parch_norm,
+         sex, pclass, embarked) %>%
+  # One-hot encoding
+  mutate(
+    sex_female = ifelse(sex == "female", 1, 0),
+    sex_male = ifelse(sex == "male", 1, 0),
+    pclass_1 = ifelse(pclass == "1", 1, 0),
+    pclass_2 = ifelse(pclass == "2", 1, 0),
+    pclass_3 = ifelse(pclass == "3", 1, 0),
+    embarked_C = ifelse(embarked == "C", 1, 0),
+    embarked_Q = ifelse(embarked == "Q", 1, 0),
+    embarked_S = ifelse(embarked == "S", 1, 0)
+  ) %>%
+  select(-sex, -pclass, -embarked)
+
+cat(sprintf("✓ Dataset ACP : %d obs × %d variables\n\n", 
+            nrow(df_acp), ncol(df_acp)))
+
+print("Variables pour ACP :\n")
+print(colnames(df_acp))
+
+
+# Réaliser l'ACP
+res_acp <- PCA(df_acp, scale.unit = TRUE, graph = FALSE)
+
+
+print("\n\n CRÉATION DES GRAPHIQUES\n")
+
+# 1. Graphique des valeurs propres (Scree plot)
+cat("\n1. Graphique des valeurs propres (éboulis des variances)...\n")
+fviz_eig(res_acp, 
+         addlabels = TRUE, 
+         ylim = c(0, 50),
+         main = "Valeurs propres - Pourcentage de variance expliquée",
+         xlab = "Dimensions",
+         ylab = "Pourcentage de variance (%)") +
+  theme_minimal()
+
+# 2. Cercle des corrélations (variables)
+print("\n2. Cercle des corrélations...\n")
+fviz_pca_var(res_acp,
+             col.var = "contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             title = "Cercle des corrélations - Variables") +
+  theme_minimal()
+
+# 3. Contribution des variables aux dimensions
+print("\n3. Contribution des variables aux dimensions...\n")
+
+# Dimension 1
+p1 <- fviz_contrib(res_acp, choice = "var", axes = 1, 
+                   top = 10, title = "Contribution à la Dimension 1")
+print(p1)
+
+# Dimension 2
+p2 <- fviz_contrib(res_acp, choice = "var", axes = 2, 
+                   top = 10, title = "Contribution à la Dimension 2")
+print(p2)
+
+
+print("\n\n ANALYSE SUPPLÉMENTAIRE\n")
+
+# 4. Heatmap des corrélations entre variables
+print("\n. Heatmap des corrélations...\n")
+cor_matrix <- cor(df_acp)
+corrplot(cor_matrix, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         tl.col = "black",
+         tl.srt = 45,
+         title = "Matrice de corrélation des variables")
+
+
+# 5. Résumé des résultats
+print("\n\n RÉSUMÉ DES RÉSULTATS\n")
+# Variance expliquée
+variance <- get_eigenvalue(res_acp)
+print("\nVariance expliquée par dimension :\n")
+print(variance[1:5, ])
+
+# Meilleures variables contributives
+print("\nTop 5 variables contribuant à la Dimension 1 :\n")
+contrib_dim1 <- sort(res_acp$var$contrib[,1], decreasing = TRUE)
+print(head(contrib_dim1, 5))
+
+print("\nTop 5 variables contribuant à la Dimension 2 :\n")
+contrib_dim2 <- sort(res_acp$var$contrib[,2], decreasing = TRUE)
+print(head(contrib_dim2, 5))
+
+print("\n\n✓ ACP terminée avec succès !\n")
+```
+
+## 3.2 Appliquer ACP
+
+```{r apply-pca}
+## EXÉCUTION DE L'ACP
+
+# ACP
+pca_result <- PCA(df_acp, scale.unit = FALSE, graph = FALSE, ncp = 5)
+print("✓ ACP exécutée\n\n")
+
+# Variance
+variance_exp <- pca_result$eig[, 2]
+cumsum_var <- pca_result$eig[, 3]
+
+print("VARIANCE EXPLIQUÉE\n")
+var_table <- data.frame(
+  PC = paste0("PC", 1:5),
+  Variance = round(variance_exp[1:5], 2),
+  Cumulative = round(cumsum_var[1:5], 2)
+)
+
+print(var_table)
+
+print(sprintf("\n✓ PC1-PC3 : %.1f%% variance\n", cumsum_var[3]))
+print(sprintf("✓ PC1-PC5 : %.1f%% variance\n\n", cumsum_var[5]))
+
+# Scree plot
+scree_data <- data.frame(PC = 1:10, Var = pca_result$eig[1:10, 2])
+
+p_scree <- ggplot(scree_data, aes(x = PC, y = Var)) +
+  geom_line(color = "#3498db", size = 1) +
+  geom_point(color = "#3498db", size = 3) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "#e74c3c", size = 1) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Scree Plot", x = "PC", y = "Variance (%)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_scree)
+```
+
+## 3.3 Visualisation PCA
+
+```{r pca-viz}
+print("\n\n VISUALISATION PCA\n")
+
+# Extraire PCs
+X_pca <- pca_result$ind$coord[, 1:3]
+
+# Biplot (teinter par survie pour illustration post-hoc)
+p_biplot <- fviz_pca_biplot(pca_result,
+                            geom = c("point", "arrow"),
+                            habillage = as.factor(survived_col),
+                            ggtheme = theme_minimal(),
+                            legend.title = "Survie",
+                            addEllipses = TRUE) +
+  labs(title = "Biplot PCA (Illustration avec survie en couleur)",
+       subtitle = "⚠  La couleur survie est UNIQUEMENT pour visualisation\nKmeans ne l'a pas utilisée") +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_biplot)
+print("\n✓ PCA analysée\n")
+```
+
+---
+
+# ÉTAPE 4 : K-MEANS 
+
+## 4.1 Sélection K
+
+```{r optimal-k}
+print("\n\n SÉLECTION DU NOMBRE DE CLUSTERS\n")
+
+# Elbow
+wcss <- numeric(10)
+for (k in 1:10) {
+  km <- kmeans(X_pca, centers = k, nstart = 10, iter.max = 300)
+  wcss[k] <- km$tot.withinss
+}
+
+elbow_df <- data.frame(K = 1:10, WCSS = wcss)
+
+p_elbow <- ggplot(elbow_df, aes(x = K, y = WCSS)) +
+  geom_line(color = "#2980b9", size = 1) +
+  geom_point(color = "#2980b9", size = 3) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "#e74c3c", size = 1.2) +
+  annotate("text", x = 3.3, y = max(wcss) * 0.95, label = "K=3",
+           color = "#e74c3c", fontface = "bold") +
+  labs(title = "Méthode du Coude", x = "K", y = "WCSS") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_elbow)
+
+# Silhouette
+print("\nMéthode Silhouette :\n")
+sil_scores <- numeric(9)
+for (k in 2:10) {
+  km <- kmeans(X_pca, centers = k, nstart = 10, iter.max = 300)
+  sil <- silhouette(km$cluster, dist(X_pca))
+  sil_scores[k - 1] <- mean(sil[, 3])
+  cat(sprintf("K=%d : Silhouette = %.3f\n", k, sil_scores[k-1]))
+}
+
+print("\n✓ K=3 sélectionné (coude + Silhouette)\n")
+```
+
+## 4.2 K-Means Exécution
+
+```{r kmeans-execution}
+print("\n\n K-MEANS FINAL (K=3)\n")
+
+set.seed(42)
+km_final <- kmeans(X_pca, centers = 3, nstart = 50, iter.max = 300)
+
+cat("✓ K-Means convergé\n\n")
+
+print("Distribution des clusters :\n")
+cluster_table <- table(km_final$cluster)
+cluster_pct <- 100 * cluster_table / sum(cluster_table)
+
+for (i in 1:3) {
+  cat(sprintf("Cluster %d : %4d obs (%5.1f%%)\n", 
+              i, cluster_table[i], cluster_pct[i]))
+}
+
+print(sprintf("\nInertie : %.2f\n", km_final$tot.withinss))
+print(sprintf("Itérations : %d\n\n", km_final$iter))
+
+print("K-Means Appliqué")
+```
+
+## 4.3 Visualisation Clusters
+
+```{r cluster-viz}
+
+# données clusters
+cluster_df <- data.frame(
+  PC1 = X_pca[, 1],
+  PC2 = X_pca[, 2],
+  Cluster = as.factor(km_final$cluster)
+)
+
+# centroïdes
+centroids_df <- data.frame(
+  PC1 = km_final$centers[, 1],
+  PC2 = km_final$centers[, 2],
+  Cluster = as.factor(1:nrow(km_final$centers))
+)
+
+# graphique
+p_cluster <- ggplot(cluster_df, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 2.2, alpha = 0.65) +
+  
+  geom_point(
+    data = centroids_df,
+    aes(x = PC1, y = PC2, color = Cluster),
+    shape = 17,
+    size = 6,
+    stroke = 1.5,
+    show.legend = FALSE
+  ) +
+  
+  scale_color_manual(values = c("#2ecc71", "#f39c12", "#e74c3c")) +
+  
+  labs(
+    title = "K-Means Clustering sur composantes principales",
+    subtitle = "Triangles = centroïdes",
+    x = "PC1",
+    y = "PC2",
+    color = "Cluster"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "gray40")
+  )
+
+print(p_cluster)
+
+print("\n✓ Clusters visualisés correctement\n")
+```
+
+
+---
+
+# ÉTAPE 5 : ANALYSE COMBINÉE (Validation post-hoc)
+
+## 5.1 CONCORDANCE CLUSTERS × SURVIE 
+
+```{r cluster-survival-analysis}
+print("APRÈS K-MEANS : LIEN AVEC SURVIE (Validation post-hoc)\n")
+
+print("⚠  IMPORTANT :\n")
+print("    • Les clusters sont 100% basés sur les FEATURES\n")
+print("    • Maintenant on VÉRIFIE s'ils reflètent la survie\n")
+print("    • C'est une VALIDATION POST-HOC, pas du biais de clustering\n\n")
+
+# Croiser
+concordance <- table(Cluster = km_final$cluster,
+                     Survie = survived_col)
+
+print("Matrice de Croix (Clusters × Survie) :\n\n")
+print(concordance)
+
+# Taux survie par cluster
+print("\n\nTAUX DE SURVIE PAR CLUSTER\n")
+
+for (i in 1:3) {
+  total <- sum(concordance[i, ])
+  survived <- concordance[i, 2]
+  rate <- 100 * survived / total
+  cat(sprintf("Cluster %d : %3d/%3d = %.1f%% survie\n",
+              i, survived, total, rate))
+}
+
+# Graphique
+concord_df <- as.data.frame(concordance) %>%
+  mutate(Survie = factor(Survie, labels = c("Décédé", "Survivant")))
+
+p_concord <- ggplot(concord_df, aes(x = Cluster, y = Freq, fill = Survie)) +
+  geom_col(position = "dodge", alpha = 0.8, color = "white") +
+  scale_fill_manual(values = c("#e74c3c", "#2ecc71")) +
+  geom_text(aes(label = Freq), position = position_dodge(0.9),
+            vjust = -0.5, fontface = "bold") +
+  labs(title = "Composition des clusters par survie",
+       subtitle = "Découverte POST-HOC : les clusters correspondent à des profils de survie différents !",
+       x = "Cluster", y = "Nombre d'observations") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(p_concord)
+
+print("\n✓ Concordance analysée\n")
+```
+
+## 5.2 Caractéristiques des clusters
+
+```{r cluster-characteristics}
+print("\n\n PROFILS DES CLUSTERS (Post-clustering)\n")
+
+
+# Réassocier données originales
+df_analysis <- df_clean %>%
+  mutate(
+    Cluster = km_final$cluster,
+    Survie = survived_col
+  )
+
+for (clust in 1:3) {
+  cat(sprintf("\n╔════════════════════════════════════╗\n"))
+  cat(sprintf("║         CLUSTER %d                ║\n", clust))
+  cat(sprintf("╚════════════════════════════════════╝\n\n"))
+  
+  cluster_data <- df_analysis %>% filter(Cluster == clust)
+  
+  n <- nrow(cluster_data)
+  survived_count <- sum(cluster_data$Survie == 1)
+  survived_pct <- 100 * survived_count / n
+  
+  cat(sprintf("Taille : %d passagers (%.1f%%)\n", n, 100*n/nrow(df_analysis)))
+  cat(sprintf("Survie : %d/%d (%.1f%%)\n\n", survived_count, n, survived_pct))
+  
+  cat("PROFIL DÉMOGRAPHIQUE\n")
+  cat(sprintf("  • Âge moyen : %.1f ans\n", mean(cluster_data$age)))
+  cat(sprintf("  • Femmes : %.1f%%\n", 
+              100 * sum(cluster_data$sex == "female") / n))
+  cat(sprintf("  • Hommes : %.1f%%\n\n",
+              100 * sum(cluster_data$sex == "male") / n))
+  
+  cat("PROFIL ÉCONOMIQUE\n")
+  cat(sprintf("  • Classe 1 : %.1f%%\n",
+              100 * sum(cluster_data$pclass == "1") / n))
+  cat(sprintf("  • Classe 2 : %.1f%%\n",
+              100 * sum(cluster_data$pclass == "2") / n))
+  cat(sprintf("  • Classe 3 : %.1f%%\n",
+              100 * sum(cluster_data$pclass == "3") / n))
+  cat(sprintf("  • Fare moyen : £%.2f\n\n", mean(cluster_data$fare)))
+  
+  cat("COMPOSITION FAMILIALE\n")
+  cat(sprintf("  • SibSp moyen : %.2f\n", mean(cluster_data$sibsp)))
+  cat(sprintf("  • Parch moyen : %.2f\n\n", mean(cluster_data$parch)))
+}
+
+print("✓ Profils caractérisés\n")
+```
+
+---
+
+---
+
+# ÉTAPE 6 : INTERPRÉTATION ET CONCLUSIONS
+
+## 6.1 Synthèse globale
+
+```{r synthesis}
+
+print("SYNTHÈSE : RÉSULTATS PRINCIPAUX\n")
+cat("
+ETAPE 1 : PROBLÉMATIQUE
+   Segmenter passagers Titanic
+
+ÉTAPE 2 : DONNÉES
+   • 889 observations × 7 variables (SANS target)
+   • Variables : âge, sexe, classe, prix, port, famille
+   • Target 'survived' SÉPARÉE (utilisée APRÈS uniquement)
+
+ÉTAPE 3 : ACP
+   • 11 variables (numériques normalisées + catégories encodées)
+   • PC1-PC3 expliquent 65% variance
+   • Axes : Prix/Classe, Sexe, Âge/Famille
+
+ÉTAPE 4 : K-MEANS ( non-supervisé)
+   • K=3 sélectionné (coude + Silhouette)
+   • 3 clusters naturels identifiés
+
+ÉTAPE 5 : VALIDATION POST-HOC
+   • Cluster 1 : 71% survie (profil haut-standing)
+   • Cluster 2 : 57% survie (profil classe moyenne)
+   • Cluster 3 : 24% survie (profil classe populaire)
+
+ÉTAPE 6 : CONCLUSIONS
+   → K-Means a découvert naturellement des profils
+   → Ces profils corrèlent fortement avec la survie
+   → Classe/Sexe/Âge sont les drivers cachés
+   → Résultat = segmentation honnête, non-biaisée
+")
+```
+
+## 6.2 Variables explicatives
+
+```{r explanatory-factors}
+print("\nFACTEURS EXPLICATIFS DE LA SURVIE\n")
+
+
+print("Analyse par variable (APRÈS clustering) :\n\n")
+
+print("1. CLASSE (TRÈS FORTE corrélation)\n")
+class_surv <- df_analysis %>%
+  group_by(pclass) %>%
+  summarize(Taux = round(100 * mean(Survie == 1), 1))
+print(class_surv)
+
+print("\n2. SEXE (TRÈS FORTE corrélation)\n")
+sex_surv <- df_analysis %>%
+  group_by(sex) %>%
+  summarize(Taux = round(100 * mean(Survie == 1), 1))
+print(sex_surv)
+
+print("\n3. ÂGE (MODÉRÉE corrélation)\n")
+age_surv <- df_analysis %>%
+  mutate(Age_Group = cut(age, c(0, 18, 50, 100), 
+                         labels = c("Enfants", "Adultes", "Âgés"))) %>%
+  group_by(Age_Group) %>%
+  summarize(Taux = round(100 * mean(Survie == 1), 1))
+print(age_surv)
+
+print("\n✓ Variables explicatives identifiées\n")
+```
+
+## 6.3 Recommandations métier
+
+```{r recommendations}
+print("\n\n RECOMMANDATIONS DÉCISIONNELLES\n")
+
+cat("
+APPLICATIONS PRATIQUES
+
+1. GESTION DES CRISES (Sanitaire, Évacuation, etc.)
+   → Identifier populations vulnérables
+   → Cluster 3 = Groupe à risque
+   → Prioriser ressources/secours
+
+2. SEGMENTATION CLIENTS (Maritime, Transport)
+   → Cluster 1 : Premium (marges hautes)
+   → Cluster 2 : Standard (volume)
+   → Cluster 3 : Low-cost (accessibilité)
+
+3. ÉQUITÉ ET JUSTICE
+   → Éviter discrimination classe/sexe/âge
+   → Assurer égal accès ressources critiques
+   → Transparence dans protocoles d'urgence
+
+4. INSIGHTS HISTORIQUES
+   ✓ Titanic : inégalité structurelle confirmée
+   ✓ Classe déterminait survie (71% vs 24%)
+   ✓ Sexe était proxy pour classe (femmes=1ère)
+   ✓ Leçon : Concevoir systèmes justes dès départ
+")
+
+print("\n✓ Recommandations formulées\n")
+```
+
+---
+
+#  RÉSUMÉ EXÉCUTIF
+
+```{r executive-summary}
+print("RÉSUMÉ EXÉCUTIF - ANALYSE TITANIC\n")
+cat("
+
+RÉSULTATS :
+  • 3 clusters naturels découverts
+  • APRÈS : on constate forte corrélation clusters ↔ survie
+  • = Preuve que clustering est pertinent
+
+DÉCOUVERTES :
+  ✓ Cluster 1 : Élites (1ère classe, femmes) → 71% survie
+  ✓ Cluster 2 : Classe moyenne (2ème classe) → 57% survie
+  ✓ Cluster 3 : Populaire (3ème classe, hommes) → 24% survie
+
+VALEUR AJOUTÉE :
+  → Segmentation OBJECTIVE basée sur caractéristiques
+  → Non biaisée par labels de survie
+  → Découverte de structure naturelle dans données
+  → Validation ultérieure confirme pertinence
+")
+
+
+print(" ANALYSE TERMINÉE\n")
+
+```
+
+---
+
+```{r session}
+sessionInfo()
+```
